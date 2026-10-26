@@ -1,135 +1,315 @@
+// src/app/search/page.js
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
-import { Film, Tv, Sparkles, Search as SearchIcon } from 'lucide-react';
-import { useTheme } from '@/context/ThemeContext';
-import api from '@/services/api';
-import SearchBar from '@/components/search/SearchBar';
+import { Search, Film, Tv, Sparkles, X, Loader2 } from 'lucide-react';
 import ContentCard from '@/components/content/ContentCard';
-import { SkeletonGrid } from '@/components/ui/SkeletonCard';
+import SkeletonCard from '@/components/ui/SkeletonCard';
+import api from '@/services/api';
 
-const SEARCH_TYPES = [
-    { value: 'movie', label: 'Movies', icon: Film, endpoint: '/search/movies' },
-    { value: 'tv', label: 'TV Shows', icon: Tv, endpoint: '/search/tv' },
-    { value: 'anime', label: 'Anime', icon: Sparkles, endpoint: '/search/anime' },
+const CATEGORIES = [
+    { key: 'all', label: 'All', icon: Sparkles },
+    { key: 'movie', label: 'Movies', icon: Film },
+    { key: 'tv', label: 'TV Shows', icon: Tv },
+    { key: 'anime', label: 'Anime', icon: Sparkles },
 ];
 
-export default function SearchPage() {
-    const { theme } = useTheme();
-    const isDark = theme === 'dark';
-    const [activeType, setActiveType] = useState('movie');
-    const [query, setQuery] = useState('');
+function SearchContent() {
+    const searchParams = useSearchParams();
+    const router = useRouter();
+    const query = searchParams.get('q') || '';
+    const category = searchParams.get('cat') || 'all';
+
     const [results, setResults] = useState([]);
     const [loading, setLoading] = useState(false);
-    const [searched, setSearched] = useState(false);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [searchInput, setSearchInput] = useState(query);
+    const [page, setPage] = useState(1);
+    const [hasMore, setHasMore] = useState(false);
+    const [totalCount, setTotalCount] = useState(0);
 
-    const handleSearch = async (searchQuery) => {
-        if (!searchQuery) {
+    const lastSearchRef = useRef('');
+
+    const fetchPage = useCallback(async (q, cat, pageNum, append = false) => {
+        if (!q.trim()) {
             setResults([]);
-            setSearched(false);
+            setTotalCount(0);
+            setHasMore(false);
             return;
         }
 
-        setQuery(searchQuery);
-        setLoading(true);
-        setSearched(true);
+        if (append) setLoadingMore(true);
+        else setLoading(true);
 
         try {
-            const endpoint = SEARCH_TYPES.find((t) => t.value === activeType).endpoint;
-            const res = await api.get(endpoint, { params: { query: searchQuery } });
-            setResults(res.data.data || []);
-        } catch (error) {
-            console.error(error);
-            setResults([]);
+            const extract = (res) => {
+                const d = res?.data?.data;
+                const items = Array.isArray(d) ? d : d?.results || [];
+                const pagination = res?.data?.pagination || {};
+                return { items, pagination };
+            };
+
+            if (cat === 'all') {
+                const [movies, tv, anime] = await Promise.allSettled([
+                    api.get('/search/movies', { params: { query: q, page: pageNum } }),
+                    api.get('/search/tv', { params: { query: q, page: pageNum } }),
+                    api.get('/search/anime', { params: { query: q, page: pageNum } }),
+                ]);
+
+                let allItems = [];
+                let total = 0;
+                let anyHasMore = false;
+
+                [movies, tv, anime].forEach((result) => {
+                    if (result.status === 'fulfilled') {
+                        const { items, pagination } = extract(result.value);
+                        allItems.push(...items);
+                        total += pagination.totalResults || items.length;
+                        if (pagination.currentPage < pagination.totalPages) anyHasMore = true;
+                    }
+                });
+
+                setResults((prev) => (append ? [...prev, ...allItems] : allItems));
+                setTotalCount(total);
+                setHasMore(anyHasMore);
+            } else {
+                const endpoint = cat === 'movie' ? 'movies' : cat === 'tv' ? 'tv' : 'anime';
+                const res = await api.get(`/search/${endpoint}`, { params: { query: q, page: pageNum } });
+                const { items, pagination } = extract(res);
+
+                setResults((prev) => (append ? [...prev, ...items] : items));
+                setTotalCount(pagination.totalResults || items.length);
+                setHasMore(pagination.currentPage < pagination.totalPages);
+            }
+        } catch {
+            if (!append) setResults([]);
+            setTotalCount(0);
+            setHasMore(false);
         } finally {
             setLoading(false);
+            setLoadingMore(false);
         }
+    }, []);
+
+    // Fire search when query or category changes
+    useEffect(() => {
+        const searchKey = `${query.trim().toLowerCase()}|${category}`;
+        if (searchKey === lastSearchRef.current) return;
+        lastSearchRef.current = searchKey;
+
+        setPage(1);
+        fetchPage(query, category, 1, false);
+    }, [query, category, fetchPage]);
+
+    const handleSearch = (e) => {
+        e.preventDefault();
+        if (!searchInput.trim()) return;
+        const params = new URLSearchParams();
+        params.set('q', searchInput.trim());
+        if (category !== 'all') params.set('cat', category);
+        router.push(`/search?${params.toString()}`);
     };
 
-    // Re-search when type changes
-    useEffect(() => {
-        if (query) handleSearch(query);
-    }, [activeType]);
+    const setCategory = (cat) => {
+        const params = new URLSearchParams();
+        if (query) params.set('q', query);
+        if (cat !== 'all') params.set('cat', cat);
+        router.push(`/search?${params.toString()}`);
+    };
+
+    const clearSearch = () => {
+        setSearchInput('');
+        router.push('/search');
+    };
+
+    const loadMore = () => {
+        const nextPage = page + 1;
+        setPage(nextPage);
+        fetchPage(query, category, nextPage, true);
+    };
 
     return (
-        <div className="max-w-7xl mx-auto px-4 py-8">
-            {/* Hero */}
-            <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="text-center mb-8"
-            >
-                <h1 className="text-4xl sm:text-5xl font-heading font-black mb-3">
-                    Find Your Next <span className="text-gradient-gold">Obsession</span>
-                </h1>
-                <p className={`${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                    Search across movies, TV shows, and anime
-                </p>
-            </motion.div>
-
-            {/* Search Bar */}
-            <div className="max-w-3xl mx-auto mb-6">
-                <SearchBar
-                    onSearch={handleSearch}
-                    placeholder={`Search ${SEARCH_TYPES.find((t) => t.value === activeType).label.toLowerCase()}...`}
-                    autoFocus
-                />
-            </div>
-
-            {/* Type Tabs */}
-            <div className="flex items-center justify-center gap-2 mb-8 overflow-x-auto">
-                {SEARCH_TYPES.map((type) => {
-                    const Icon = type.icon;
-                    const active = activeType === type.value;
-                    return (
-                        <button
-                            key={type.value}
-                            onClick={() => setActiveType(type.value)}
-                            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all whitespace-nowrap ${active
-                                    ? 'bg-gradient-gold text-dark-bg shadow-lg'
-                                    : isDark
-                                        ? 'bg-dark-surface border border-dark-border hover:border-accent-gold/50'
-                                        : 'bg-light-surface border border-light-border hover:border-accent-burgundy/50'
-                                }`}
-                        >
-                            <Icon className="w-4 h-4" />
-                            {type.label}
-                        </button>
-                    );
-                })}
-            </div>
-
-            {/* Results */}
-            {loading ? (
-                <SkeletonGrid count={10} />
-            ) : !searched ? (
-                <div className="text-center py-16">
-                    <SearchIcon className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-700' : 'text-gray-300'}`} />
-                    <p className={`text-lg ${isDark ? 'text-gray-500' : 'text-gray-500'}`}>
-                        Start typing to discover content
+        <div className="min-h-screen bg-dark-bg py-8 px-4">
+            <div className="max-w-7xl mx-auto">
+                {/* Header */}
+                <motion.div
+                    initial={{ opacity: 0, y: -20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="mb-8"
+                >
+                    <h1 className="text-3xl md:text-4xl font-heading font-bold text-white mb-2">
+                        Search <span className="text-gradient-gold">Content</span>
+                    </h1>
+                    <p className="text-gray-400">
+                        Find movies, TV shows, and anime to add to your stash
                     </p>
+                </motion.div>
+
+                {/* Search Bar */}
+                <motion.form
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.1 }}
+                    onSubmit={handleSearch}
+                    className="relative mb-6"
+                >
+                    <div className="relative">
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+                        <input
+                            type="text"
+                            value={searchInput}
+                            onChange={(e) => setSearchInput(e.target.value)}
+                            placeholder="Search movies, TV shows, anime..."
+                            className="w-full pl-12 pr-14 py-4 bg-dark-surface border border-dark-border rounded-xl text-white placeholder-gray-500 focus:outline-none focus:border-accent-gold focus:ring-1 focus:ring-accent-gold transition-all text-lg"
+                            autoFocus
+                        />
+                        {searchInput && (
+                            <button
+                                type="button"
+                                onClick={clearSearch}
+                                className="absolute right-4 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-white transition-colors"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        )}
+                    </div>
+                </motion.form>
+
+                {/* Category Tabs — always visible */}
+                <div className="flex flex-wrap gap-2 mb-6">
+                    {CATEGORIES.map((cat) => {
+                        const Icon = cat.icon;
+                        const isActive = category === cat.key;
+                        return (
+                            <button
+                                key={cat.key}
+                                type="button"
+                                onClick={() => setCategory(cat.key)}
+                                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${isActive
+                                        ? 'bg-accent-gold text-dark-bg'
+                                        : 'bg-dark-surface text-gray-300 hover:bg-dark-hover hover:text-white border border-dark-border'
+                                    }`}
+                            >
+                                <Icon className="w-4 h-4" />
+                                {cat.label}
+                            </button>
+                        );
+                    })}
                 </div>
-            ) : results.length === 0 ? (
-                <div className="text-center py-16">
-                    <SearchIcon className={`w-16 h-16 mx-auto mb-4 ${isDark ? 'text-gray-700' : 'text-gray-300'}`} />
-                    <p className={`text-lg mb-2 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                        No results found for &quot;{query}&quot;
-                    </p>
-                    <p className="text-sm text-gray-500">Try a different search term</p>
-                </div>
-            ) : (
-                <>
-                    <p className={`text-sm mb-4 ${isDark ? 'text-gray-400' : 'text-gray-600'}`}>
-                        Found <span className="text-accent-gold font-semibold">{results.length}</span> results for &quot;{query}&quot;
-                    </p>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                        {results.map((item, i) => (
-                            <ContentCard key={`${item.type}-${item.id}`} item={item} index={i} />
+
+                {/* Results */}
+                {loading ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                        {Array.from({ length: 12 }).map((_, i) => (
+                            <SkeletonCard key={i} />
                         ))}
                     </div>
-                </>
-            )}
+                ) : query ? (
+                    results.length > 0 ? (
+                        <>
+                            <p className="text-gray-400 mb-4">
+                                Found{' '}
+                                <span className="text-white font-semibold">
+                                    {totalCount.toLocaleString()}
+                                </span>{' '}
+                                results for &quot;<span className="text-accent-gold">{query}</span>&quot;
+                            </p>
+
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4"
+                            >
+                                {results.map((item, index) => (
+                                    <motion.div
+                                        key={`${item.type}-${item.id}-${index}`}
+                                        initial={{ opacity: 0, y: 20 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        transition={{ delay: Math.min(index * 0.02, 0.3) }}
+                                    >
+                                        <ContentCard item={item} />
+                                    </motion.div>
+                                ))}
+                            </motion.div>
+
+                            {/* Show More */}
+                            {hasMore && (
+                                <div className="flex justify-center mt-10">
+                                    <button
+                                        onClick={loadMore}
+                                        disabled={loadingMore}
+                                        className="flex items-center gap-2 px-8 py-3 bg-dark-surface border border-dark-border text-white rounded-xl hover:bg-dark-hover hover:border-accent-gold transition-all disabled:opacity-50"
+                                    >
+                                        {loadingMore ? (
+                                            <>
+                                                <Loader2 className="w-4 h-4 animate-spin" />
+                                                Loading...
+                                            </>
+                                        ) : (
+                                            'Show More'
+                                        )}
+                                    </button>
+                                </div>
+                            )}
+                        </>
+                    ) : (
+                        <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            className="text-center py-20"
+                        >
+                            <Search className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                            <h3 className="text-xl font-heading font-semibold text-white mb-2">
+                                No results found
+                            </h3>
+                            <p className="text-gray-400">
+                                Try a different search term or change the category filter
+                            </p>
+                        </motion.div>
+                    )
+                ) : (
+                    <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        className="text-center py-20"
+                    >
+                        <Search className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+                        <h3 className="text-xl font-heading font-semibold text-white mb-2">
+                            Start searching
+                        </h3>
+                        <p className="text-gray-400">
+                            Type a title above to discover movies, TV shows, and anime
+                        </p>
+                    </motion.div>
+                )}
+            </div>
         </div>
+    );
+}
+
+function SearchFallback() {
+    return (
+        <div className="min-h-screen bg-dark-bg py-8 px-4">
+            <div className="max-w-7xl mx-auto">
+                <div className="h-10 w-48 skeleton rounded-lg mb-2" />
+                <div className="h-5 w-72 skeleton rounded mb-8" />
+                <div className="h-14 w-full skeleton rounded-xl mb-6" />
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                    {Array.from({ length: 12 }).map((_, i) => (
+                        <SkeletonCard key={i} />
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+export default function SearchPage() {
+    return (
+        <Suspense fallback={<SearchFallback />}>
+            <SearchContent />
+        </Suspense>
     );
 }
